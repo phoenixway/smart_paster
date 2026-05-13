@@ -21,6 +21,7 @@ from .diagnostics import DiagnosticLog, build_dump_text
 from .diff_preview import unified_preview
 from .modes import SourceMode, TargetMode
 from .provider_health import build_provider_health_report
+from .theme import apply_system_theme
 from .utils import discover_git_root, is_git_worktree, run_command
 
 
@@ -58,7 +59,8 @@ class SmartPasterApp(tk.Tk):
         self.auto_watch_clipboard_var = tk.BooleanVar(value=True)
 
         self._build_ui()
-        self.diagnostics.add("app_started", repo_root=str(git_root))
+        active_theme = apply_system_theme(self)
+        self.diagnostics.add("app_started", repo_root=str(git_root), theme=active_theme)
         self.after(900, self.poll_clipboard)
 
     def _build_ui(self) -> None:
