@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Edit SMART_PASTER_HOME if your checkout lives elsewhere, or export it before running.
+SMART_PASTER_HOME="${SMART_PASTER_HOME:-$HOME/studio/public/it/smart_paster}"
+exec python3 "$SMART_PASTER_HOME/run_smart_paster.py" "$@"

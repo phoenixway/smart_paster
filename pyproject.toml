@@ -1,0 +1,9 @@
+[project]
+name = "smart-paster"
+version = "0.1.0"
+description = "Clipboard-driven guarded patch applier for web-chat coding workflows"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+smart-paster = "smart_paster.main:main"
