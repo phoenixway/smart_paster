@@ -124,7 +124,7 @@ def build_preview_certificate(repo_root: Path, plan: ApplyPlan) -> ApplyCertific
         if op.mode == TargetMode.EXACT_REPLACE:
             find = op.operation.block_to_replace or ""
             replace = op.operation.replace_block or ""
-            checks.append(CertificateCheck("exact replace resolved", "pass", op.rel_name))
+            checks.append(CertificateCheck("exact replace target matched safely", "pass", op.rel_name))
             checks.append(CertificateCheck("target fragment hash captured", "pass" if find else "warn", f"{op.rel_name}: {short_hash(find) if find else 'empty target fragment'}"))
             checks.append(CertificateCheck("replacement fragment hash captured", "pass" if replace else "warn", f"{op.rel_name}: {short_hash(replace) if replace else 'empty replacement fragment'}"))
             if find:
@@ -133,7 +133,7 @@ def build_preview_certificate(repo_root: Path, plan: ApplyPlan) -> ApplyCertific
                 checks.append(CertificateCheck("replacement fragment occurrence plan", "pass", f"{op.rel_name}: after={op.new_text.count(replace)}"))
         elif op.mode == TargetMode.METHOD:
             provider = op.provider_name or "unknown provider"
-            checks.append(CertificateCheck("symbol resolved uniquely", "pass", f"{op.rel_name} via {provider}"))
+            checks.append(CertificateCheck("symbol target found uniquely", "pass", f"{op.rel_name} via {provider}"))
             if op.operation.replace_block is not None:
                 checks.append(CertificateCheck("replacement symbol hash captured", "pass", f"{op.rel_name}: {short_hash(op.operation.replace_block)}"))
         elif op.mode == TargetMode.NEW_FILE:
@@ -147,7 +147,7 @@ def build_preview_certificate(repo_root: Path, plan: ApplyPlan) -> ApplyCertific
         verdict=verdict,
         confidence=trust,
         trust_level=trust,
-        title="Preview certificate: plan is resolved; no files were written.",
+        title="Preview certificate: patch was parsed and validated; no files were written.",
         checks=checks,
         planned_files=sorted(plan.planned_rel_names),
         written_files=[],
@@ -178,7 +178,13 @@ def build_apply_certificate(
     if before_git_status:
         pre_existing = sorted(plan.touched_rel_names & before_git_status)
         if pre_existing:
-            checks.append(CertificateCheck("pre-existing target modifications", "warn", ", ".join(pre_existing)))
+            checks.append(
+                CertificateCheck(
+                    "target files were already modified before this Smart Paster run",
+                    "warn",
+                    ", ".join(pre_existing),
+                )
+            )
 
     if result.dry_run:
         after_disk = snapshot_disk(set(before_disk))
@@ -237,11 +243,11 @@ def build_apply_certificate(
             rel = str(path.relative_to(repo_root))
             actual = path.read_text() if path.exists() else None
             if actual == planned_text:
-                checks.append(CertificateCheck("post-write disk content verified", "pass", rel))
-                checks.append(CertificateCheck("post-write full file hash verified", "pass", f"{rel}: {short_hash(planned_text)}"))
+                checks.append(CertificateCheck("post-write file content exactly matches planned output", "pass", rel))
+                checks.append(CertificateCheck("post-write full file hash matches planned output", "pass", f"{rel}: {short_hash(planned_text)}"))
             else:
-                checks.append(CertificateCheck("post-write disk content verified", "fail", rel))
-                checks.append(CertificateCheck("post-write full file hash verified", "fail", rel))
+                checks.append(CertificateCheck("post-write file content exactly matches planned output", "fail", rel))
+                checks.append(CertificateCheck("post-write full file hash matches planned output", "fail", rel))
 
         for op in plan.changed:
             if op.mode == TargetMode.EXACT_REPLACE:
@@ -261,9 +267,9 @@ def build_apply_certificate(
         allowed_prefixes = (".smart-paster-backups/", ".smart-paster-dumps/", ".smart-paster-history/")
         unexpected = sorted(item for item in (after_git_status - before_git_status - planned_rel) if not item.startswith(allowed_prefixes))
         if unexpected:
-            checks.append(CertificateCheck("git unexpected changes guard", "fail", ", ".join(unexpected)))
+            checks.append(CertificateCheck("unexpected git changes outside planned files", "fail", ", ".join(unexpected)))
         else:
-            checks.append(CertificateCheck("git unexpected changes guard", "pass"))
+            checks.append(CertificateCheck("no unexpected git changes outside planned files", "pass"))
     else:
         checks.append(CertificateCheck("git worktree", "warn", "not available; disk verification used instead"))
 
@@ -306,17 +312,29 @@ def _append_exact_replace_fragment_checks(checks: list[CertificateCheck], repo_r
         actual_old_count = actual_text.count(find)
         planned_old_count = op.new_text.count(find)
         status = "pass" if actual_old_count == planned_old_count else "fail"
-        checks.append(CertificateCheck("post-apply target fragment hash verified", status, f"{rel}: sha256={short_hash(find)} planned_old_count={planned_old_count} actual_old_count={actual_old_count}"))
+        checks.append(
+            CertificateCheck(
+                "post-apply target fragment count matches plan",
+                status,
+                f"{rel}: target_sha256={short_hash(find)} planned_count={planned_old_count} actual_count={actual_old_count}",
+            )
+        )
     else:
-        checks.append(CertificateCheck("post-apply target fragment hash verified", "warn", f"{rel}: empty target fragment"))
+        checks.append(CertificateCheck("post-apply target fragment count matches plan", "warn", f"{rel}: empty target fragment"))
 
     if replace:
         actual_replace_count = actual_text.count(replace)
         planned_replace_count = op.new_text.count(replace)
         status = "pass" if actual_replace_count == planned_replace_count else "fail"
-        checks.append(CertificateCheck("post-apply replacement fragment hash verified", status, f"{rel}: sha256={short_hash(replace)} planned_count={planned_replace_count} actual_count={actual_replace_count}"))
+        checks.append(
+            CertificateCheck(
+                "post-apply replacement fragment count/hash matches plan",
+                status,
+                f"{rel}: replacement_sha256={short_hash(replace)} planned_count={planned_replace_count} actual_count={actual_replace_count}",
+            )
+        )
     else:
-        checks.append(CertificateCheck("post-apply replacement fragment hash verified", "warn", f"{rel}: empty replacement fragment"))
+        checks.append(CertificateCheck("post-apply replacement fragment count/hash matches plan", "warn", f"{rel}: empty replacement fragment"))
 
 
 def _append_method_symbol_checks(checks: list[CertificateCheck], repo_root: Path, op, symbol_providers: SymbolProviderRegistry) -> None:
