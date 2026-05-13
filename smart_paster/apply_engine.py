@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import shutil
 import time
-from collections import defaultdict
 from pathlib import Path
 
 from .domain import ApplyPlan, ApplyResult, BackupRecord, PatchBatch, PatchOperation, ResolvedOperation, SymbolSpan
@@ -37,10 +36,9 @@ class ApplyEngine:
 
         # Sequential per file: each operation sees prior in-memory changes for the same file.
         current_text_by_path: dict[Path, str] = {}
-        original_text_by_path: dict[Path, str] = {}
         resolved: list[ResolvedOperation] = []
 
-        for index, operation in enumerate(batch.operations):
+        for operation in batch.operations:
             allow_override = len(batch.operations) == 1
             op = self._with_ui_overrides(operation, allow_override, ui_target_override, ui_symbol_override)
             target_path = safe_target_path(repo_root, op.filename)
@@ -51,7 +49,6 @@ class ApplyEngine:
                 old_text = current_text_by_path[target_path]
             else:
                 old_text = target_path.read_text() if target_path.exists() else ""
-                original_text_by_path[target_path] = old_text
 
             new_text, provider_name = self._resolve_new_text(
                 repo_root=repo_root,
@@ -69,6 +66,7 @@ class ApplyEngine:
                     rel_name=rel_name,
                     old_text=old_text,
                     new_text=new_text,
+                    mode=mode,
                     provider_name=provider_name,
                 )
             )

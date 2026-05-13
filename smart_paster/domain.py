@@ -36,6 +36,7 @@ class ResolvedOperation:
     rel_name: str
     old_text: str
     new_text: str
+    mode: TargetMode
     provider_name: str | None = None
 
 
@@ -46,6 +47,14 @@ class ApplyPlan:
     @property
     def changed(self) -> list[ResolvedOperation]:
         return [op for op in self.operations if op.old_text != op.new_text]
+
+    @property
+    def planned_files(self) -> set[Path]:
+        return {op.target_path for op in self.changed}
+
+    @property
+    def planned_rel_names(self) -> set[str]:
+        return {op.rel_name for op in self.changed}
 
 
 @dataclass(frozen=True)

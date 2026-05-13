@@ -8,6 +8,14 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from .apply_engine import ApplyEngine
+from .certificate import (
+    build_apply_certificate,
+    build_preview_certificate,
+    git_changed_files,
+    render_certificate,
+    render_plan_preview,
+    snapshot_disk,
+)
 from .clipboard_parser import parse_clipboard_text
 from .diagnostics import DiagnosticLog, build_dump_text
 from .diff_preview import unified_preview
@@ -55,9 +63,6 @@ class SmartPasterApp(tk.Tk):
         root = ttk.Frame(self, padding=8)
         root.pack(fill=tk.BOTH, expand=True)
 
-        # Top controls are grouped into a horizontal paned area. When the window
-        # gets narrow, each group wraps its internal controls instead of pushing
-        # buttons off-screen.
         controls = ttk.Frame(root)
         controls.pack(fill=tk.X, pady=(0, 8))
         controls.columnconfigure(0, weight=3)
@@ -78,19 +83,34 @@ class SmartPasterApp(tk.Tk):
         pane.pack(fill=tk.BOTH, expand=True)
 
         left = ttk.LabelFrame(pane, text="Incoming text / clipboard")
-        right = ttk.LabelFrame(pane, text="Preview / log")
+        right = ttk.LabelFrame(pane, text="Output")
         pane.add(left, weight=1)
         pane.add(right, weight=1)
 
         self.input_text = scrolledtext.ScrolledText(left, wrap=tk.NONE, undo=True)
         self.input_text.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
-        self.output_text = scrolledtext.ScrolledText(right, wrap=tk.NONE, undo=True)
-        self.output_text.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        self.output_tabs = ttk.Notebook(right)
+        self.output_tabs.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+        preview_tab = ttk.Frame(self.output_tabs)
+        history_tab = ttk.Frame(self.output_tabs)
+        self.output_tabs.add(preview_tab, text="Preview")
+        self.output_tabs.add(history_tab, text="History")
+
+        self.preview_text = scrolledtext.ScrolledText(preview_tab, wrap=tk.NONE, undo=True)
+        self.preview_text.pack(fill=tk.BOTH, expand=True)
+
+        self.history_text = scrolledtext.ScrolledText(history_tab, wrap=tk.NONE, undo=True)
+        self.history_text.pack(fill=tk.BOTH, expand=True)
+
+        self.output_text = self.history_text
 
         self.log(
             "Paste a web-chat answer containing a fenced ```json Smart Paster patch.\n"
             "Valid patches synchronize Target fields and auto-preview.\n"
+            "Preview output is kept separate from History/log output.\n"
+            "Apply now produces a certificate: SAFE / WARNING / BLOCKED.\n"
             "Use Dump when something smells odd: it writes a diagnostic report.\n"
         )
 
@@ -275,14 +295,44 @@ class SmartPasterApp(tk.Tk):
 
     def clear_text(self) -> None:
         self.input_text.delete("1.0", tk.END)
-        self.output_text.delete("1.0", tk.END)
+        self.clear_preview()
+        self.history_text.delete("1.0", tk.END)
         self.diagnostics.add("clear_text")
 
     def log(self, message: str) -> None:
-        self.output_text.insert(tk.END, message)
+        self.history_text.insert(tk.END, message)
         if not message.endswith("\n"):
-            self.output_text.insert(tk.END, "\n")
-        self.output_text.see(tk.END)
+            self.history_text.insert(tk.END, "\n")
+        self.history_text.see(tk.END)
+
+    def clear_preview(self) -> None:
+        self.preview_text.delete("1.0", tk.END)
+
+    def preview_log(self, message: str) -> None:
+        self.preview_text.insert(tk.END, message)
+        if not message.endswith("\n"):
+            self.preview_text.insert(tk.END, "\n")
+        self.preview_text.see(tk.END)
+
+    def write_preview(self, message: str) -> None:
+        self.clear_preview()
+        self.select_preview_tab()
+        self.preview_text.insert("1.0", message)
+        self.preview_text.see("1.0")
+
+    def select_preview_tab(self) -> None:
+        self.output_tabs.select(0)
+
+    def select_history_tab(self) -> None:
+        self.output_tabs.select(1)
+
+    def output_snapshot_text(self) -> str:
+        return (
+            "## Preview tab\n\n"
+            + self.preview_text.get("1.0", tk.END)
+            + "\n## History tab\n\n"
+            + self.history_text.get("1.0", tk.END)
+        )
 
     def get_input(self) -> str:
         return self.input_text.get("1.0", tk.END).rstrip("\n")
@@ -292,8 +342,6 @@ class SmartPasterApp(tk.Tk):
         batch = parse_clipboard_text(self.get_input(), SourceMode(self.source_mode_var.get()))
         self.sync_ui_from_batch(batch, trigger="build_plan")
 
-        # JSON/patch paths are authoritative. The Target file field is synchronized
-        # from the patch and used for visibility/open-target, not as a stale override.
         plan = self.engine.plan(
             repo_root=repo_root,
             batch=batch,
@@ -306,96 +354,99 @@ class SmartPasterApp(tk.Tk):
 
     def preview(self) -> None:
         try:
+            repo_root = Path(self.repo_root_var.get()).resolve()
             plan = self.build_plan()
             self.last_plan = plan
-            self.output_text.delete("1.0", tk.END)
-            self.log(f"Operations: {len(plan.operations)}")
-            self.log(f"Changed operations: {len(plan.changed)}")
-            for index, op in enumerate(plan.operations, start=1):
-                self.log(f"\n=== Operation {index}: {op.rel_name} ===")
-                self.log(f"Source kind: {op.operation.source_kind}")
-                self.log(f"Mode: {(op.operation.mode or TargetMode(self.target_mode_var.get())).value}")
-                if op.provider_name:
-                    self.log(f"Symbol provider: {op.provider_name}")
-                self.log(f"Old size: {len(op.old_text)} bytes")
-                self.log(f"New size: {len(op.new_text)} bytes")
-                self.log("\n--- Preview diff ---\n")
-                diff = unified_preview(op.old_text, op.new_text, op.rel_name)
-                self.log(diff if diff.strip() else "No changes.")
+            certificate = build_preview_certificate(repo_root, plan)
+            output = render_certificate(certificate)
+            output += "\n--- Planned diff ---\n"
+            output += render_plan_preview(plan, unified_preview)
+            self.write_preview(output)
+            self.diagnostics.add(
+                "preview_certificate",
+                verdict=certificate.verdict,
+                confidence=certificate.confidence,
+                operations=len(plan.operations),
+                changed=len(plan.changed),
+                planned_files=sorted(plan.planned_rel_names),
+            )
+            self.log(
+                f"Preview certificate: {certificate.verdict} "
+                f"({len(plan.changed)} changed operations, {len(plan.planned_files)} files).\n"
+            )
         except Exception as exc:
             self.diagnostics.add_exception("preview_failed", exc)
-            self.output_text.delete("1.0", tk.END)
-            self.log(f"ERROR: {exc}")
+            self.write_preview(f"BLOCKED ⛔\n\nPreview failed: {exc}\n")
             messagebox.showerror("Preview failed", str(exc))
 
     def apply(self) -> None:
         try:
+            repo_root = Path(self.repo_root_var.get()).resolve()
             plan = self.build_plan()
             self.last_plan = plan
-            repo_root = Path(self.repo_root_var.get()).resolve()
-            self.output_text.delete("1.0", tk.END)
-            self.log(f"Operations: {len(plan.operations)}")
-            self.log(f"Dry run: {self.dry_run_var.get()}")
+            before_disk = snapshot_disk(plan.planned_files)
+            before_git_status = git_changed_files(repo_root) if is_git_worktree(repo_root) else None
 
-            before_disk = self._snapshot_existing_targets(plan)
             result = self.engine.apply_plan(
                 repo_root=repo_root,
                 plan=plan,
                 dry_run=self.dry_run_var.get(),
                 backup=self.backup_var.get(),
             )
-            self.diagnostics.add(
-                "apply_plan_returned",
-                dry_run=result.dry_run,
-                written_files=[str(p) for p in result.written_files],
-                backups=[str(b.backup_path) for b in result.backups],
+            certificate = build_apply_certificate(
+                repo_root=repo_root,
+                plan=plan,
+                result=result,
+                before_disk=before_disk,
+                before_git_status=before_git_status,
+                symbol_providers=self.engine.symbol_providers,
             )
 
-            if result.dry_run:
-                violations = self._check_dry_run_unchanged(before_disk)
-                self.log("Dry run is enabled. No files written.\n")
-                if violations:
-                    self.log("CRITICAL: dry-run disk-change guard detected changed files!\n")
-                    for path in violations:
-                        self.log(f"Changed unexpectedly: {path}")
-                    self.diagnostics.add("dry_run_guard_violation", files=[str(p) for p in violations])
-                else:
-                    self.log("Dry-run guard: target files unchanged on disk.\n")
-                for op in plan.changed:
-                    self.log(f"\n=== {op.rel_name} ===")
-                    self.log(unified_preview(op.old_text, op.new_text, op.rel_name))
-                self.show_git_diff(append=True)
-                return
+            output = render_certificate(certificate)
+            if result.dry_run or certificate.verdict != "SAFE":
+                output += "\n--- Planned diff ---\n"
+                output += render_plan_preview(plan, unified_preview)
+            self.write_preview(output)
 
+            self.history_text.delete("1.0", tk.END)
+            self.select_history_tab()
+            self.log(f"Operations: {len(plan.operations)}")
+            self.log(f"Dry run: {result.dry_run}")
+            self.log(f"Certificate: {certificate.verdict} confidence={certificate.confidence}")
             for backup in result.backups:
                 self.log(f"Backup: {backup.backup_path.relative_to(repo_root)}")
             for path in result.written_files:
                 self.log(f"Wrote: {path.relative_to(repo_root)}")
+
+            self.diagnostics.add(
+                "apply_certificate",
+                verdict=certificate.verdict,
+                confidence=certificate.confidence,
+                dry_run=result.dry_run,
+                operations=len(plan.operations),
+                changed=len(plan.changed),
+                written_files=[str(path.relative_to(repo_root)) for path in result.written_files],
+            )
             self.show_git_diff(append=True)
+
+            if certificate.verdict == "BLOCKED":
+                messagebox.showwarning(
+                    "Apply verification failed",
+                    "Smart Paster certificate is BLOCKED. Review Preview and Dump before continuing.",
+                )
         except Exception as exc:
             self.diagnostics.add_exception("apply_failed", exc)
-            self.output_text.delete("1.0", tk.END)
+            self.write_preview(f"BLOCKED ⛔\n\nApply failed: {exc}\n")
+            self.history_text.delete("1.0", tk.END)
+            self.select_history_tab()
             self.log(f"ERROR: {exc}")
             messagebox.showerror("Apply failed", str(exc))
-
-    def _snapshot_existing_targets(self, plan) -> dict[Path, str]:
-        snapshot: dict[Path, str] = {}
-        for op in plan.operations:
-            if op.target_path.exists() and op.target_path not in snapshot:
-                snapshot[op.target_path] = op.target_path.read_text()
-        return snapshot
-
-    def _check_dry_run_unchanged(self, before_disk: dict[Path, str]) -> list[Path]:
-        changed: list[Path] = []
-        for path, before in before_disk.items():
-            if not path.exists() or path.read_text() != before:
-                changed.append(path)
-        return changed
 
     def show_git_diff(self, append: bool = False) -> None:
         repo_root = Path(self.repo_root_var.get()).resolve()
         if not append:
-            self.output_text.delete("1.0", tk.END)
+            self.history_text.delete("1.0", tk.END)
+            self.select_history_tab()
 
         if not is_git_worktree(repo_root):
             self.diagnostics.add("git_worktree_summary", is_git_worktree=False, repo_root=str(repo_root))
@@ -527,7 +578,7 @@ class SmartPasterApp(tk.Tk):
             dump_text = build_dump_text(
                 repo_root=repo_root,
                 input_text=self.get_input(),
-                output_text=self.output_text.get("1.0", tk.END),
+                output_text=self.output_snapshot_text(),
                 settings=settings,
                 log=self.diagnostics,
                 git_status=(git_status or status_err),
@@ -556,7 +607,7 @@ class SmartPasterApp(tk.Tk):
                 {
                     "rel_name": op.rel_name,
                     "source_kind": op.operation.source_kind,
-                    "mode": op.operation.mode.value if op.operation.mode else None,
+                    "mode": op.mode.value,
                     "symbol": op.operation.symbol,
                     "symbol_kind": op.operation.symbol_kind,
                     "container_name": op.operation.container_name,
