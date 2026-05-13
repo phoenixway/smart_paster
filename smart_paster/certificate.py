@@ -227,6 +227,9 @@ def build_apply_certificate(
             for op in plan.changed:
                 if op.mode == TargetMode.NEW_FILE:
                     checks.append(CertificateCheck("new file written", "pass", op.rel_name))
+            for op in plan.changed:
+                if op.mode == TargetMode.NEW_FILE:
+                    checks.append(CertificateCheck("new file written", "pass", op.rel_name))
         else:
             checks.append(CertificateCheck("written files match planned files", "fail", f"planned={sorted(planned_rel)} written={sorted(written_rel)}"))
 
