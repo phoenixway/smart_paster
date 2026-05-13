@@ -188,10 +188,45 @@ def build_apply_certificate(
         else:
             checks.append(CertificateCheck("dry-run disk guard", "pass", "disk content unchanged"))
         checks.append(CertificateCheck("write skipped", "pass", "dry_run=True"))
+        checks.append(
+            CertificateCheck(
+                "written files intentionally zero",
+                "info",
+                "Dry run validates the plan but must not write files. Turn off Dry run for real apply.",
+            )
+        )
     else:
         written_rel = {str(path.resolve().relative_to(repo_root)) for path in result.written_files}
+        if plan.changed and not written_rel:
+            checks.append(
+                CertificateCheck(
+                    "real apply wrote files",
+                    "fail",
+                    f"planned_changes={len(plan.changed)} but written_files=0",
+                )
+            )
+        elif plan.changed:
+            checks.append(
+                CertificateCheck(
+                    "real apply wrote files",
+                    "pass",
+                    f"written_files={len(written_rel)} planned_files={len(planned_rel)}",
+                )
+            )
+        else:
+            checks.append(
+                CertificateCheck(
+                    "real apply had nothing to write",
+                    "info",
+                    "all operations were no-op / already applied",
+                )
+            )
+
         if written_rel == planned_rel:
             checks.append(CertificateCheck("written files match planned files", "pass", ", ".join(sorted(written_rel)) or "none"))
+            for op in plan.changed:
+                if op.mode == TargetMode.NEW_FILE:
+                    checks.append(CertificateCheck("new file written", "pass", op.rel_name))
         else:
             checks.append(CertificateCheck("written files match planned files", "fail", f"planned={sorted(planned_rel)} written={sorted(written_rel)}"))
 
