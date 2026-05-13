@@ -21,7 +21,7 @@ from .diagnostics import DiagnosticLog, build_dump_text
 from .diff_preview import unified_preview
 from .modes import SourceMode, TargetMode
 from .provider_health import build_provider_health_report
-from .theme import apply_system_theme
+from .theme import apply_system_theme, resolve_theme, system_theme_watching_enabled
 from .utils import discover_git_root, is_git_worktree, run_command
 
 
@@ -59,9 +59,10 @@ class SmartPasterApp(tk.Tk):
         self.auto_watch_clipboard_var = tk.BooleanVar(value=True)
 
         self._build_ui()
-        active_theme = apply_system_theme(self)
-        self.diagnostics.add("app_started", repo_root=str(git_root), theme=active_theme)
+        self.active_theme = apply_system_theme(self)
+        self.diagnostics.add("app_started", repo_root=str(git_root), theme=self.active_theme)
         self.after(900, self.poll_clipboard)
+        self.after(1500, self.poll_system_theme)
 
     def _build_ui(self) -> None:
         root = ttk.Frame(self, padding=8)
@@ -280,6 +281,17 @@ class SmartPasterApp(tk.Tk):
             target_mode=first.mode.value if first.mode else None,
             symbol=first.symbol,
         )
+
+    def poll_system_theme(self) -> None:
+        try:
+            if system_theme_watching_enabled():
+                next_theme = resolve_theme()
+                if next_theme != getattr(self, "active_theme", None):
+                    self.active_theme = apply_system_theme(self)
+                    self.diagnostics.add("system_theme_changed", theme=self.active_theme)
+                    self.log(f"System theme changed: {self.active_theme}\n")
+        finally:
+            self.after(1500, self.poll_system_theme)
 
     def poll_clipboard(self) -> None:
         try:
