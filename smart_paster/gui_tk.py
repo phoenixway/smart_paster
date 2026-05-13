@@ -20,6 +20,7 @@ from .clipboard_parser import parse_clipboard_text
 from .diagnostics import DiagnosticLog, build_dump_text
 from .diff_preview import unified_preview
 from .modes import SourceMode, TargetMode
+from .provider_health import build_provider_health_report
 from .utils import discover_git_root, is_git_worktree, run_command
 
 
@@ -43,6 +44,7 @@ class SmartPasterApp(tk.Tk):
         git_root = discover_git_root(cwd) or cwd
         self.engine = ApplyEngine()
         self.last_plan = None
+        self.last_certificate_text = ""
         self.diagnostics = DiagnosticLog()
         self._last_clipboard_text = ""
 
@@ -110,7 +112,8 @@ class SmartPasterApp(tk.Tk):
             "Paste a web-chat answer containing a fenced ```json Smart Paster patch.\n"
             "Valid patches synchronize Target fields and auto-preview.\n"
             "Preview output is kept separate from History/log output.\n"
-            "Apply now produces a certificate: SAFE / WARNING / BLOCKED.\n"
+            "Apply produces a certificate: DRY-RUN SAFE / APPLY SAFE / WARNING / BLOCKED.\n"
+            "Repository files are the source of truth; the old canvas MVP is archival only.\n"
             "Use Dump when something smells odd: it writes a diagnostic report.\n"
         )
 
@@ -176,6 +179,8 @@ class SmartPasterApp(tk.Tk):
                 ("Paste", self.paste_clipboard),
                 ("Preview", self.preview),
                 ("Apply", self.apply),
+                ("Copy cert", self.copy_certificate),
+                ("Provider health", self.provider_health),
                 ("Open target", self.open_target),
                 ("Intro prompt", self.open_intro_prompt),
                 ("Git diff", self.show_git_diff),
@@ -297,6 +302,7 @@ class SmartPasterApp(tk.Tk):
         self.input_text.delete("1.0", tk.END)
         self.clear_preview()
         self.history_text.delete("1.0", tk.END)
+        self.last_certificate_text = ""
         self.diagnostics.add("clear_text")
 
     def log(self, message: str) -> None:
@@ -358,25 +364,30 @@ class SmartPasterApp(tk.Tk):
             plan = self.build_plan()
             self.last_plan = plan
             certificate = build_preview_certificate(repo_root, plan)
-            output = render_certificate(certificate)
+            certificate_text = render_certificate(certificate)
+            output = certificate_text
             output += "\n--- Planned diff ---\n"
             output += render_plan_preview(plan, unified_preview)
+            self.last_certificate_text = certificate_text
             self.write_preview(output)
             self.diagnostics.add(
                 "preview_certificate",
                 verdict=certificate.verdict,
                 confidence=certificate.confidence,
+                trust_level=certificate.trust_level,
                 operations=len(plan.operations),
                 changed=len(plan.changed),
                 planned_files=sorted(plan.planned_rel_names),
             )
             self.log(
                 f"Preview certificate: {certificate.verdict} "
+                f"trust={certificate.trust_level} "
                 f"({len(plan.changed)} changed operations, {len(plan.planned_files)} files).\n"
             )
         except Exception as exc:
             self.diagnostics.add_exception("preview_failed", exc)
-            self.write_preview(f"BLOCKED ⛔\n\nPreview failed: {exc}\n")
+            self.last_certificate_text = f"BLOCKED ⛔\n\nPreview failed: {exc}\n"
+            self.write_preview(self.last_certificate_text)
             messagebox.showerror("Preview failed", str(exc))
 
     def apply(self) -> None:
@@ -384,7 +395,7 @@ class SmartPasterApp(tk.Tk):
             repo_root = Path(self.repo_root_var.get()).resolve()
             plan = self.build_plan()
             self.last_plan = plan
-            before_disk = snapshot_disk(plan.planned_files)
+            before_disk = snapshot_disk(plan.touched_files)
             before_git_status = git_changed_files(repo_root) if is_git_worktree(repo_root) else None
 
             result = self.engine.apply_plan(
@@ -402,17 +413,19 @@ class SmartPasterApp(tk.Tk):
                 symbol_providers=self.engine.symbol_providers,
             )
 
-            output = render_certificate(certificate)
-            if result.dry_run or certificate.verdict != "SAFE":
+            certificate_text = render_certificate(certificate)
+            output = certificate_text
+            if result.dry_run or certificate.verdict != "APPLY SAFE":
                 output += "\n--- Planned diff ---\n"
                 output += render_plan_preview(plan, unified_preview)
+            self.last_certificate_text = certificate_text
             self.write_preview(output)
 
             self.history_text.delete("1.0", tk.END)
             self.select_history_tab()
             self.log(f"Operations: {len(plan.operations)}")
             self.log(f"Dry run: {result.dry_run}")
-            self.log(f"Certificate: {certificate.verdict} confidence={certificate.confidence}")
+            self.log(f"Certificate: {certificate.verdict} trust={certificate.trust_level}")
             for backup in result.backups:
                 self.log(f"Backup: {backup.backup_path.relative_to(repo_root)}")
             for path in result.written_files:
@@ -422,6 +435,7 @@ class SmartPasterApp(tk.Tk):
                 "apply_certificate",
                 verdict=certificate.verdict,
                 confidence=certificate.confidence,
+                trust_level=certificate.trust_level,
                 dry_run=result.dry_run,
                 operations=len(plan.operations),
                 changed=len(plan.changed),
@@ -436,11 +450,33 @@ class SmartPasterApp(tk.Tk):
                 )
         except Exception as exc:
             self.diagnostics.add_exception("apply_failed", exc)
-            self.write_preview(f"BLOCKED ⛔\n\nApply failed: {exc}\n")
+            self.last_certificate_text = f"BLOCKED ⛔\n\nApply failed: {exc}\n"
+            self.write_preview(self.last_certificate_text)
             self.history_text.delete("1.0", tk.END)
             self.select_history_tab()
             self.log(f"ERROR: {exc}")
             messagebox.showerror("Apply failed", str(exc))
+
+    def copy_certificate(self) -> None:
+        if not self.last_certificate_text.strip():
+            messagebox.showinfo("Copy certificate", "No certificate is available yet. Run Preview or Apply first.")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(self.last_certificate_text)
+        self.diagnostics.add("copy_certificate", chars=len(self.last_certificate_text))
+        self.log("Certificate copied to clipboard.\n")
+
+    def provider_health(self) -> None:
+        try:
+            repo_root = Path(self.repo_root_var.get()).resolve()
+            report = build_provider_health_report(self.engine.symbol_providers, repo_root)
+            self.write_preview(report)
+            self.diagnostics.add("provider_health", repo_root=str(repo_root))
+            self.log("Provider health report rendered in Preview.\n")
+        except Exception as exc:
+            self.diagnostics.add_exception("provider_health_failed", exc)
+            self.write_preview(f"Provider health failed: {exc}\n")
+            messagebox.showerror("Provider health failed", str(exc))
 
     def show_git_diff(self, append: bool = False) -> None:
         repo_root = Path(self.repo_root_var.get()).resolve()
@@ -613,6 +649,7 @@ class SmartPasterApp(tk.Tk):
                     "container_name": op.operation.container_name,
                     "occurrence": op.operation.occurrence,
                     "provider_name": op.provider_name,
+                    "status_note": op.status_note,
                     "old_size": len(op.old_text),
                     "new_size": len(op.new_text),
                     "changed": op.old_text != op.new_text,

@@ -38,6 +38,7 @@ class ResolvedOperation:
     new_text: str
     mode: TargetMode
     provider_name: str | None = None
+    status_note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -49,12 +50,24 @@ class ApplyPlan:
         return [op for op in self.operations if op.old_text != op.new_text]
 
     @property
+    def no_op(self) -> list[ResolvedOperation]:
+        return [op for op in self.operations if op.old_text == op.new_text]
+
+    @property
     def planned_files(self) -> set[Path]:
         return {op.target_path for op in self.changed}
 
     @property
     def planned_rel_names(self) -> set[str]:
         return {op.rel_name for op in self.changed}
+
+    @property
+    def touched_files(self) -> set[Path]:
+        return {op.target_path for op in self.operations}
+
+    @property
+    def touched_rel_names(self) -> set[str]:
+        return {op.rel_name for op in self.operations}
 
 
 @dataclass(frozen=True)

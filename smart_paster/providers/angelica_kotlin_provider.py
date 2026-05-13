@@ -22,6 +22,7 @@ class AngelicaKotlinSymbolProvider(SymbolProvider):
 
     name = "angelica_kotlin_tree_sitter"
     IMPORT_CANDIDATES = (
+        "modules.tools.definitions._kotlin_symbol_extractor",
         "modules.tools._kotlin_symbol_extractor",
         "modules.tools.code._kotlin_symbol_extractor",
         "modules.agent.tools._kotlin_symbol_extractor",

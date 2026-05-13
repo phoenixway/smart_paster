@@ -37,38 +37,50 @@ class ApplyEngine:
         # Sequential per file: each operation sees prior in-memory changes for the same file.
         current_text_by_path: dict[Path, str] = {}
         resolved: list[ResolvedOperation] = []
+        validation_errors: list[str] = []
 
-        for operation in batch.operations:
-            allow_override = len(batch.operations) == 1
-            op = self._with_ui_overrides(operation, allow_override, ui_target_override, ui_symbol_override)
-            target_path = safe_target_path(repo_root, op.filename)
-            rel_name = str(target_path.relative_to(repo_root))
-            mode = op.mode or default_mode
+        for index, operation in enumerate(batch.operations, start=1):
+            filename_hint = operation.filename or "<missing filename>"
+            try:
+                allow_override = len(batch.operations) == 1
+                op = self._with_ui_overrides(operation, allow_override, ui_target_override, ui_symbol_override)
+                target_path = safe_target_path(repo_root, op.filename)
+                rel_name = str(target_path.relative_to(repo_root))
+                mode = op.mode or default_mode
 
-            if target_path in current_text_by_path:
-                old_text = current_text_by_path[target_path]
-            else:
-                old_text = target_path.read_text() if target_path.exists() else ""
+                if target_path in current_text_by_path:
+                    old_text = current_text_by_path[target_path]
+                else:
+                    old_text = target_path.read_text() if target_path.exists() else ""
 
-            new_text, provider_name = self._resolve_new_text(
-                repo_root=repo_root,
-                target_path=target_path,
-                rel_name=rel_name,
-                old_text=old_text,
-                operation=op,
-                mode=mode,
-            )
-            current_text_by_path[target_path] = new_text
-            resolved.append(
-                ResolvedOperation(
-                    operation=op,
+                new_text, provider_name, status_note = self._resolve_new_text(
+                    repo_root=repo_root,
                     target_path=target_path,
                     rel_name=rel_name,
                     old_text=old_text,
-                    new_text=new_text,
+                    operation=op,
                     mode=mode,
-                    provider_name=provider_name,
                 )
+                current_text_by_path[target_path] = new_text
+                resolved.append(
+                    ResolvedOperation(
+                        operation=op,
+                        target_path=target_path,
+                        rel_name=rel_name,
+                        old_text=old_text,
+                        new_text=new_text,
+                        mode=mode,
+                        provider_name=provider_name,
+                        status_note=status_note,
+                    )
+                )
+            except Exception as exc:
+                validation_errors.append(_format_operation_validation_error(index, filename_hint, exc))
+
+        if validation_errors:
+            raise ValidationError(
+                "Plan validation failed. Files with validation/match problems:\n"
+                + "\n".join(f"- {item}" for item in validation_errors)
             )
 
         return ApplyPlan(resolved)
@@ -131,25 +143,28 @@ class ApplyEngine:
         old_text: str,
         operation: PatchOperation,
         mode: TargetMode,
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str, str | None, str | None]:
         if operation.replace_block is None:
             raise ValidationError(f"Operation for {rel_name} requires replace_block.")
 
         if mode == TargetMode.NEW_FILE:
             if target_path.exists() and not operation.allow_overwrite:
                 raise ValidationError(f"New file target already exists: {rel_name}. Set allow_overwrite=true or use full_file.")
-            return operation.replace_block, None
+            status = "already_applied_new_file" if target_path.exists() and old_text == operation.replace_block else "new_file_planned"
+            return operation.replace_block, None, status
 
         if not target_path.exists():
             raise ValidationError(f"Target file does not exist: {rel_name}")
 
         if mode == TargetMode.FULL_FILE:
-            return operation.replace_block, None
+            status = "already_applied_full_file" if old_text == operation.replace_block else "full_file_replacement_planned"
+            return operation.replace_block, None, status
 
         if mode == TargetMode.EXACT_REPLACE:
             if operation.block_to_replace is None:
                 raise ValidationError(f"Exact replace for {rel_name} requires block_to_replace/find/old.")
-            return exact_replace(old_text, operation.block_to_replace, operation.replace_block), None
+            new_text, status_note = exact_replace_plan(old_text, operation.block_to_replace, operation.replace_block)
+            return new_text, None, status_note
 
         if mode == TargetMode.METHOD:
             symbol = operation.symbol
@@ -164,18 +179,37 @@ class ApplyEngine:
                 occurrence=operation.occurrence,
                 repo_root=repo_root,
             )
-            return replace_line_span(old_text, span, operation.replace_block), span.provider
+            replacement = operation.replace_block.rstrip() + "\n"
+            selected = span.selected_text.rstrip() + "\n"
+            status = "already_applied_method" if selected == replacement else "method_replacement_planned"
+            return replace_line_span(old_text, span, operation.replace_block), span.provider, status
 
         raise ValidationError(f"Unsupported mode: {mode}")
 
 
+def exact_replace_plan(old_text: str, find: str, replace: str) -> tuple[str, str]:
+    find_count = old_text.count(find)
+    replace_count = old_text.count(replace)
+
+    if find_count == 1:
+        new_text = old_text.replace(find, replace, 1)
+        status = "already_applied_exact_replace" if new_text == old_text else "exact_replace_planned"
+        return new_text, status
+
+    if find_count == 0 and replace_count > 0:
+        return old_text, "already_applied_exact_replace"
+
+    if find_count == 0:
+        raise ApplyError(
+            "exact_replace mismatch: target fragment was not found; "
+            f"replacement fragment occurrences={replace_count}"
+        )
+
+    raise ApplyError(f"exact_replace ambiguous: target fragment occurs {find_count} times")
+
+
 def exact_replace(old_text: str, find: str, replace: str) -> str:
-    count = old_text.count(find)
-    if count == 0:
-        raise ApplyError("Exact block was not found in target file.")
-    if count > 1:
-        raise ApplyError(f"Exact block occurs {count} times. Refusing ambiguous replace.")
-    return old_text.replace(find, replace, 1)
+    return exact_replace_plan(old_text, find, replace)[0]
 
 
 def replace_line_span(old_text: str, span: SymbolSpan, replacement: str) -> str:
@@ -196,3 +230,7 @@ def make_backup(path: Path, repo_root: Path) -> Path:
     backup_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, backup_path)
     return backup_path
+
+
+def _format_operation_validation_error(index: int, filename: str, exc: BaseException) -> str:
+    return f"operation {index}, file {filename}: {type(exc).__name__}: {exc}"
